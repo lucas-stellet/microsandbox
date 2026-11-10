@@ -969,6 +969,8 @@ Restore rejects missing external filesystems (and, for full restore, additional 
 | `cpus(), memory()` | CPU count and memory in MiB. Full restore must match capture. |
 | `networkPolicy()` | Replace host traffic filtering; guest DNS and TLS settings stay unchanged. |
 | `maxConnections()` | Concurrent TCP limit; zero means unlimited. |
+| `secret(), secretViolationAction()` | Bind protected secrets as at creation. Values come from the destination host, never the snapshot. A full restore must rebind the source's placeholders; binding a secret turns TLS interception on. |
+| `tlsInterceptCa(cert, key)` | Intercept TLS with this CA (PEM paths). Pass the source's CA when it differs from the destination's default. |
 | `disableNetwork()` | Remove the NIC. Rejected for full snapshots that captured one. |
 | `security()` | Guest security profile. Disk boot only, including an explicit default profile. |
 | `maxDuration(), idleTimeout()` | Lifetime and idle limits. Omitted means unlimited; zero expires immediately. |
@@ -1000,6 +1002,49 @@ const child = await Sandbox.restore("api:baseline")
 ```
 
 </Accordion>
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">secret()</span>
+
+```typescript
+secret(configure: (b: SecretBuilder) => SecretBuilder): this
+```
+
+Bind a protected secret in the destination, as [`network.secret()`](/sdk/typescript/networking#nb-secret) does at creation. A full restore resumes a guest that already holds its placeholders, so bind the same names and placeholders the source used. Prefer `source(SecretSource.env(...))` over `value()`: the value is read from the host environment when the sandbox starts, so it is never stored. Turns TLS interception on.
+
+<Accordion title="Example">
+
+```typescript
+import { Sandbox, SecretSource } from "microsandbox";
+
+const child = await Sandbox.restore(sleepSnapshot)
+  .name("api")
+  .dangerouslyInheritResources()
+  .secret(s => s
+    .env("API_KEY")
+    .source(SecretSource.env("HOST_API_KEY"))
+    .allow("api.example.com")
+    .substituteInHeaderFields(["authorization"])
+    .violationAction("block"))
+  .restore();
+```
+
+</Accordion>
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">secretViolationAction()</span>
+
+```typescript
+secretViolationAction(action: "block" | "block-and-log" | "block-and-terminate"): this
+```
+
+Set the destination's default action for blocked placeholders.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">tlsInterceptCa()</span>
+
+```typescript
+tlsInterceptCa(certPath: string, keyPath: string): this
+```
+
+Intercept TLS with this CA certificate and private key (PEM files). A full restore does not rerun the guest's trust setup, so the resumed guest trusts only the CA it installed at boot.
 
 #### <span className="msb-recv">restore.</span><span className="msb-hn">allowMissingResources()</span>
 

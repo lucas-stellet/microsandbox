@@ -5,7 +5,7 @@
     "url": "git+https://github.com/superradcompany/microsandbox.git",
     "directory": "sdk/node-ts"
   },
-  "version": "0.7.13",
+  "version": "0.7.13-folks.1",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -64,7 +64,7 @@
   "optionalDependencies": {
     "@superradcompany/microsandbox-darwin-arm64": "0.7.13",
     "@superradcompany/microsandbox-linux-arm64-gnu": "0.7.13",
-    "@superradcompany/microsandbox-linux-x64-gnu": "0.7.13",
+    "@superradcompany/microsandbox-linux-x64-gnu": "https://github.com/lucas-stellet/microsandbox/releases/download/v0.7.13-folks.1/superradcompany-microsandbox-linux-x64-gnu-0.7.13-folks.1.tgz",
     "@superradcompany/microsandbox-win32-arm64-msvc": "0.7.13",
     "@superradcompany/microsandbox-win32-x64-msvc": "0.7.13"
   },

@@ -49,6 +49,7 @@ pub struct JsSocks5ProxyBuilder {
 }
 
 /// Host-side source for secret material.
+#[derive(Clone)]
 #[napi(object, js_name = "SecretSourceInput")]
 pub struct JsSecretSourceInput {
     /// Source kind. Currently only `env` is supported for proxy credentials.

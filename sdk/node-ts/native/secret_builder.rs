@@ -1,8 +1,11 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
+use microsandbox::sandbox::SecretSource;
 use microsandbox_network::builder::SecretBuilder as RustSecretBuilder;
 use microsandbox_network::secrets::config::SecretEntry as RustSecretEntry;
+
+use crate::outbound_proxy_builder::JsSecretSourceInput;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -14,8 +17,10 @@ use microsandbox_network::secrets::config::SecretEntry as RustSecretEntry;
 pub struct JsSecretEntry {
     /// Environment variable name exposed to the sandbox (holds the placeholder).
     pub env_var: String,
-    /// Secret value (never enters the sandbox).
+    /// Secret value (never enters the sandbox). Empty when the value comes from `source`.
     pub value: String,
+    /// Host-side source resolved when the sandbox starts, instead of an inline value.
+    pub source: Option<JsSecretSourceInput>,
     /// Placeholder string the sandbox sees instead of the real value.
     pub placeholder: String,
     /// Exact host names allowed to receive this secret.
@@ -51,6 +56,17 @@ pub struct JsSecretSubstitution {
 #[napi(js_name = "SecretBuilder")]
 pub struct JsSecretBuilder {
     inner: Option<RustSecretBuilder>,
+    required: Required,
+}
+
+/// What the Rust builder asserts at `build()`, checked first: the native library is built with
+/// `panic = "abort"`, so a failed assertion would end the Node process instead of throwing.
+#[derive(Default)]
+struct Required {
+    env: bool,
+    value: bool,
+    source: bool,
+    host: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -63,12 +79,14 @@ impl JsSecretBuilder {
     pub fn new() -> Self {
         Self {
             inner: Some(RustSecretBuilder::new()),
+            required: Required::default(),
         }
     }
 
     /// Environment variable to expose the placeholder under (required).
     #[napi]
     pub fn env(&mut self, env_var: String) -> &Self {
+        self.required.env = true;
         let prev = self.take_inner();
         self.inner = Some(prev.env(env_var));
         self
@@ -77,9 +95,24 @@ impl JsSecretBuilder {
     /// Secret value (required).
     #[napi]
     pub fn value(&mut self, value: String) -> &Self {
+        self.required.value = true;
         let prev = self.take_inner();
         self.inner = Some(prev.value(value));
         self
+    }
+
+    /// Resolve the value from a host-side source when the sandbox starts, instead of `value()`.
+    ///
+    /// Only `{ kind: "env", var }` is supported: the durable config records the variable
+    /// name, never the plaintext, and the variable must be set whenever the sandbox starts
+    /// or is restored.
+    #[napi(ts_args_type = "source: SecretSourceInput")]
+    pub fn source(&mut self, source: JsSecretSourceInput) -> Result<&Self> {
+        let source = parse_secret_source(source)?;
+        self.required.source = true;
+        let prev = self.take_inner();
+        self.inner = Some(prev.source(source));
+        Ok(self)
     }
 
     /// Custom placeholder. Auto-generated as `$MSB_<env>` when unset.
@@ -92,16 +125,23 @@ impl JsSecretBuilder {
 
     /// Add a host allowed to receive the substituted secret value.
     #[napi]
-    pub fn allow(&mut self, host: String) -> &Self {
+    pub fn allow(&mut self, host: String) -> Result<&Self> {
+        if host == "*" {
+            return Err(napi::Error::from_reason(
+                "SecretBuilder: use .allowAnyHostDangerous(true) for an explicit any-host secret",
+            ));
+        }
+        self.required.host = true;
         let prev = self.take_inner();
         self.inner = Some(prev.allow(host));
-        self
+        Ok(self)
     }
 
     /// Allow any host. **Dangerous** — secret can be exfiltrated.
     /// Pass `true` to opt in.
     #[napi(js_name = "allowAnyHostDangerous")]
     pub fn allow_any_host_dangerous(&mut self, i_understand: bool) -> &Self {
+        self.required.host |= i_understand;
         let prev = self.take_inner();
         self.inner = Some(prev.allow_any_host_dangerous(i_understand));
         self
@@ -205,9 +245,26 @@ impl JsSecretBuilder {
     /// Internal: extract the built `SecretEntry`. Used by parent builders.
     #[allow(dead_code)]
     pub(crate) fn take_built(&mut self) -> Result<RustSecretEntry> {
-        let b = self.inner.take().ok_or_else(|| {
-            napi::Error::from_reason("SecretBuilder.build() called more than once")
-        })?;
+        if self.inner.is_none() {
+            return Err(napi::Error::from_reason(
+                "SecretBuilder.build() called more than once",
+            ));
+        }
+        let required = &self.required;
+        if !required.env {
+            return Err(napi::Error::from_reason("SecretBuilder: .env() is required"));
+        }
+        if required.value == required.source {
+            return Err(napi::Error::from_reason(
+                "SecretBuilder: exactly one of .value() or .source() is required",
+            ));
+        }
+        if !required.host {
+            return Err(napi::Error::from_reason(
+                "SecretBuilder: at least one allowed host is required; use .allowAnyHostDangerous(true) for an explicit any-host secret",
+            ));
+        }
+        let b = self.inner.take().expect("checked above");
         // Rust .build() panics if env/value missing; catch via unwind so
         // we can surface a typed error instead of crashing the process.
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.build())).map_err(|p| {
@@ -243,6 +300,13 @@ pub(crate) fn to_js_secret_entry(entry: RustSecretEntry) -> JsSecretEntry {
     JsSecretEntry {
         env_var: entry.env_var,
         value: entry.value.to_string(),
+        source: entry.source.and_then(|source| match source {
+            SecretSource::Env { var } => Some(JsSecretSourceInput {
+                kind: "env".to_string(),
+                var,
+            }),
+            SecretSource::Store { .. } => None,
+        }),
         placeholder: entry.placeholder,
         allowed_hosts,
         allowed_host_patterns,
@@ -279,6 +343,19 @@ fn host_pattern_string(pattern: microsandbox_network::secrets::config::HostPatte
         microsandbox_network::secrets::config::HostPattern::Exact(value)
         | microsandbox_network::secrets::config::HostPattern::Wildcard(value) => value,
         microsandbox_network::secrets::config::HostPattern::Any => "*".to_string(),
+    }
+}
+
+/// Accept only the sources the runtime resolves at spawn; `store` is not supported yet.
+pub(crate) fn parse_secret_source(source: JsSecretSourceInput) -> Result<SecretSource> {
+    match source.kind.as_str() {
+        "env" if !source.var.is_empty() => Ok(SecretSource::env(source.var)),
+        "env" => Err(napi::Error::from_reason(
+            "secret source env needs a host environment variable name",
+        )),
+        other => Err(napi::Error::from_reason(format!(
+            "unsupported secret source {other:?}; only env is supported"
+        ))),
     }
 }
 

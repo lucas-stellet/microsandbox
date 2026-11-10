@@ -1063,6 +1063,79 @@ describe("NetworkBuilder HTTP denial messages", () => {
 });
 
 
+describe("SecretBuilder host-side source", () => {
+  it("records an env source instead of an inline value", () => {
+    const secret = new SecretBuilder()
+      .env("FOLKS_SLOT_1")
+      .source(SecretSource.env("HOST_SLOT_1"))
+      .allow("api.github.com")
+      .build();
+
+    expect(secret.value).toBe("");
+    expect(secret.source).toEqual({ kind: "env", var: "HOST_SLOT_1" });
+    expect(secret.placeholder).toBe("$MSB_FOLKS_SLOT_1");
+  });
+
+  it("keeps the source reference, never a value, in the creation config", async () => {
+    const cfg = (await Sandbox.builder("src")
+      .image("alpine")
+      .secret((s) => s.env("FOLKS_SLOT_1").source(SecretSource.env("HOST_SLOT_1")).allow("api.github.com"))
+      .build()) as unknown as { network: { secrets: { secrets: Array<Record<string, unknown>> } } };
+
+    const [entry] = cfg.network.secrets.secrets;
+    expect(entry.source).toEqual({ kind: "env", var: "HOST_SLOT_1" });
+    expect(entry.value ?? "").toBe("");
+  });
+
+  it("rejects unsupported or empty sources", () => {
+    expect(() => new SecretBuilder().source({ kind: "store", var: "x" } as never))
+      .toThrow("only env is supported");
+    expect(() => new SecretBuilder().source(SecretSource.env("")))
+      .toThrow("needs a host environment variable name");
+  });
+
+  it("throws, instead of aborting the process, on an incomplete secret", () => {
+    expect(() => new SecretBuilder().value("v").allow("h.test").build()).toThrow(".env() is required");
+    expect(() => new SecretBuilder().env("K").value("v").build()).toThrow("at least one allowed host");
+    expect(() => new SecretBuilder().env("K").allow("*")).toThrow("allowAnyHostDangerous");
+    expect(new SecretBuilder().env("K").value("v").allowAnyHostDangerous(true).build().allowAnyHost).toBe(true);
+  });
+
+  it("still requires exactly one of value or source", () => {
+    expect(() => new SecretBuilder()
+      .env("K")
+      .value("v")
+      .source(SecretSource.env("HOST_K"))
+      .allow("h.test")
+      .build()).toThrow("exactly one of .value() or .source()");
+  });
+});
+
+describe("restore secrets", () => {
+  it("binds secrets, the violation action and the interception CA fluently", () => {
+    const builder = Sandbox.restore("saved").name("child");
+    expect(builder.secret((s) => s
+      .env("FOLKS_SLOT_1")
+      .source(SecretSource.env("HOST_SLOT_1"))
+      .allow("api.github.com")
+      .substituteInHeaderFields(["authorization"])
+      .violationAction("block"))).toBe(builder);
+    expect(builder.secretViolationAction("block-and-log")).toBe(builder);
+    expect(builder.tlsInterceptCa("/ca/source.pem", "/ca/source.key")).toBe(builder);
+  });
+
+  it("rejects an invalid violation action without consuming the builder", () => {
+    const builder = Sandbox.restore("saved").name("child");
+    expect(() => builder.secretViolationAction("allow")).toThrow("invalid secret violation action");
+    expect(builder.name("still-usable")).toBe(builder);
+  });
+
+  it("surfaces an incomplete secret as an error", () => {
+    const builder = Sandbox.restore("saved").name("child");
+    expect(() => builder.secret((s) => s.env("K").allow("h.test"))).toThrow("exactly one of .value() or .source()");
+  });
+});
+
 describe("restore copy-on-write memory naming", () => {
   it("keeps forked as a fluent alias and warns only for the deprecated spelling", async () => {
     const warning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});

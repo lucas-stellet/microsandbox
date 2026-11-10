@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import type { NetworkConfig, SecretSubstitution } from "../network-config.js";
+import type { NetworkConfig, SecretSource, SecretSubstitution } from "../network-config.js";
 import type { NetworkPolicy } from "../policy/types.js";
 import { msbPath } from "./resolve-binary.js";
 
@@ -277,6 +277,17 @@ export interface NapiRestoreBuilderSetters {
   memory(mib: number): this;
   /** Host policy only: does not configure DNS, TLS, or guest bootstrap. */
   networkPolicy(policy: NetworkPolicy | NapiNetworkPolicyBuilder): this;
+  /**
+   * Bind a protected secret in the destination, as at creation. Values come from the
+   * destination host (prefer `source(SecretSource.env(...))`), never the snapshot. A full
+   * restore must rebind the source's names and placeholders; binding one turns TLS
+   * interception on.
+   */
+  secret(configure: (b: NapiSecretBuilder) => NapiSecretBuilder): this;
+  /** Default action for blocked placeholders: `block`, `block-and-log`, or `block-and-terminate`. */
+  secretViolationAction(action: string): this;
+  /** Intercept TLS with this CA certificate and key (PEM paths); see the source's CA on full restore. */
+  tlsInterceptCa(certPath: string, keyPath: string): this;
   /** @deprecated Use maxTcpConnections instead. */
   maxConnections(count: number): this;
   /** Zero selects unlimited; omission retains destination defaults. */
@@ -1101,6 +1112,8 @@ export interface NapiTlsConfig {
 export interface NapiSecretBuilder {
   env(varName: string): this;
   value(value: string): this;
+  /** Resolve the value from a host-side source when the sandbox starts, instead of `value()`. */
+  source(source: SecretSource): this;
   placeholder(placeholder: string): this;
   allow(host: string): this;
   allowAnyHostDangerous(iUnderstand: boolean): this;
@@ -1119,6 +1132,7 @@ export interface NapiSecretBuilder {
 export interface NapiSecretEntry {
   readonly envVar: string;
   readonly value: string;
+  readonly source?: SecretSource;
   readonly placeholder: string;
   readonly allowedHosts: string[];
   readonly allowedHostPatterns: string[];
