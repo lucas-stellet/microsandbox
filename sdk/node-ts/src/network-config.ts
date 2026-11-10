@@ -90,7 +90,10 @@ export const SecretSource = {
 /** A single secret entry — built via `SecretBuilder`. */
 export interface SecretEntry {
   readonly envVar: string;
+  /** Empty when the value comes from `source`. */
   readonly value: string;
+  /** Host-side source resolved at sandbox start, when set instead of an inline value. */
+  readonly source?: SecretSource;
   readonly placeholder: string | null;
   readonly allowedHosts: readonly string[];
   readonly allowedHostPatterns: readonly string[];

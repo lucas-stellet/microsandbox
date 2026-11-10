@@ -826,6 +826,27 @@ export declare class RestoreBuilder {
   networkPolicyJson(json: string): this
   /** Set host-side policy from the existing policy builder. */
   networkPolicyFromBuilder(builder: NetworkPolicyBuilder): this
+  /**
+   * Bind a protected secret in the destination via a callback, as `SandboxBuilder.secret()`.
+   *
+   * The value is resolved on the destination host (prefer `source({ kind: "env", var })`);
+   * snapshots never store it. A full restore resumes a guest that already holds its
+   * placeholders, so bind the same names and placeholders the source used. Binding a
+   * secret turns TLS interception on.
+   */
+  secret(configure: (secret: SecretBuilder) => SecretBuilder): this
+  /**
+   * Set the destination's default action for blocked secret placeholders:
+   * `"block" | "block-and-log" | "block-and-terminate"`.
+   */
+  secretViolationAction(action: string): this
+  /**
+   * Intercept TLS with this CA certificate and key (PEM file paths) in the destination.
+   *
+   * A full restore does not rerun the guest's trust setup; pass the source's CA when it
+   * used a custom one or the destination's default CA differs.
+   */
+  tlsInterceptCa(certPath: string, keyPath: string): this
   /** @deprecated Use maxTcpConnections instead. */
   maxConnections(count: number): this
   /** Cap destination host-side TCP connections; zero selects unlimited. */
@@ -1678,6 +1699,14 @@ export declare class SecretBuilder {
   env(envVar: string): this
   /** Secret value (required). */
   value(value: string): this
+  /**
+   * Resolve the value from a host-side source when the sandbox starts, instead of `value()`.
+   *
+   * Only `{ kind: "env", var }` is supported: the durable config records the variable
+   * name, never the plaintext, and the variable must be set whenever the sandbox starts
+   * or is restored.
+   */
+  source(source: SecretSourceInput): this
   /** Custom placeholder. Auto-generated as `$MSB_<env>` when unset. */
   placeholder(placeholder: string): this
   /** Add a host allowed to receive the substituted secret value. */
@@ -2690,8 +2719,10 @@ export interface ScopedVerifyUpstream {
 export interface SecretEntry {
   /** Environment variable name exposed to the sandbox (holds the placeholder). */
   envVar: string
-  /** Secret value (never enters the sandbox). */
+  /** Secret value (never enters the sandbox). Empty when the value comes from `source`. */
   value: string
+  /** Host-side source resolved when the sandbox starts, instead of an inline value. */
+  source?: SecretSourceInput
   /** Placeholder string the sandbox sees instead of the real value. */
   placeholder: string
   /** Exact host names allowed to receive this secret. */

@@ -10,6 +10,7 @@ use crate::network_policy_builder::JsNetworkPolicyBuilder;
 use crate::pull_progress::JsPullProgressStream;
 use crate::sandbox::Sandbox;
 use crate::sandbox_builder::{JsPullProgressCreate, parse_bind_addr};
+use crate::secret_builder::{JsSecretBuilder, parse_violation_action};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -102,6 +103,44 @@ impl JsRestoreBuilder {
     ) -> Result<&Self> {
         let policy = builder.build_rust_policy()?;
         self.inner = Some(self.take_inner()?.network_policy(policy));
+        Ok(self)
+    }
+
+    /// Bind a protected secret in the destination via a callback, as `SandboxBuilder.secret()`.
+    ///
+    /// The value is resolved on the destination host (prefer `source({ kind: "env", var })`);
+    /// snapshots never store it. A full restore resumes a guest that already holds its
+    /// placeholders, so bind the same names and placeholders the source used. Binding a
+    /// secret turns TLS interception on.
+    #[napi(ts_args_type = "configure: (secret: SecretBuilder) => SecretBuilder")]
+    pub fn secret(
+        &mut self,
+        env: &Env,
+        configure: Function<ClassInstance<JsSecretBuilder>, ClassInstance<JsSecretBuilder>>,
+    ) -> Result<&Self> {
+        let initial = JsSecretBuilder::new().into_instance(env)?;
+        let mut returned = configure.call(initial)?;
+        let entry = returned.take_built()?;
+        self.inner = Some(self.take_inner()?.secret_entry(entry));
+        Ok(self)
+    }
+
+    /// Set the destination's default action for blocked secret placeholders:
+    /// `"block" | "block-and-log" | "block-and-terminate"`.
+    #[napi(js_name = "secretViolationAction")]
+    pub fn secret_violation_action(&mut self, action: String) -> Result<&Self> {
+        let action = parse_violation_action(&action)?;
+        self.inner = Some(self.take_inner()?.secret_violation_action(action));
+        Ok(self)
+    }
+
+    /// Intercept TLS with this CA certificate and key (PEM file paths) in the destination.
+    ///
+    /// A full restore does not rerun the guest's trust setup; pass the source's CA when it
+    /// used a custom one or the destination's default CA differs.
+    #[napi(js_name = "tlsInterceptCa")]
+    pub fn tls_intercept_ca(&mut self, cert_path: String, key_path: String) -> Result<&Self> {
+        self.inner = Some(self.take_inner()?.tls_intercept_ca(cert_path, key_path));
         Ok(self)
     }
 
