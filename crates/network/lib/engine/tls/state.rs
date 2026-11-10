@@ -190,9 +190,23 @@ impl TlsState {
     /// Check if a domain should bypass TLS interception.
     pub fn should_bypass(&self, sni: &str) -> bool {
         let sni_lower = normalize_domain(sni);
-        self.bypass_patterns
+        if self
+            .bypass_patterns
             .iter()
             .any(|pattern| pattern.matches_normalized(&sni_lower))
+        {
+            return true;
+        }
+        if !self.config.intercept_secret_hosts_only {
+            return false;
+        }
+        // Only the hosts a secret may go to are intercepted; with no secret, all are.
+        let secrets = self.secrets.load();
+        !secrets.secrets.is_empty()
+            && !secrets
+                .secrets
+                .iter()
+                .any(|secret| secret.allowed_hosts.iter().any(|host| host.matches(&sni_lower)))
     }
 
     /// Select the upstream connector for the given server name.
@@ -713,5 +727,72 @@ mod tests {
         std::fs::remove_file(&path).ok();
 
         assert_eq!(root_store.len(), 1);
+    }
+
+    fn secrets_for(hosts: &[&str]) -> SecretsConfig {
+        use crate::secrets::config::{HostPattern, SecretEntry, SecretSubstitution};
+        SecretsConfig {
+            secrets: vec![SecretEntry {
+                env_var: "API_KEY".into(),
+                value: zeroize::Zeroizing::new("real-secret-value".into()),
+                source: None,
+                placeholder: "$MSB_KEY".into(),
+                allowed_hosts: hosts.iter().map(|host| HostPattern::parse(host)).collect(),
+                substitution: SecretSubstitution::default(),
+                passthrough_hosts: Vec::new(),
+                violation_action: None,
+                require_tls_identity: true,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn intercepts_only_the_secrets_hosts() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let secrets = SecretsHandle::new(secrets_for(&["api.github.com", "*.example.org"]));
+        let state = TlsState::new(TlsConfig::default(), secrets.clone()).unwrap();
+        assert!(!state.should_bypass("api.github.com"));
+        assert!(!state.should_bypass("API.GitHub.com."));
+        assert!(!state.should_bypass("a.example.org"));
+        assert!(state.should_bypass("x.com"));
+        assert!(state.should_bypass("accounts.google.com"));
+
+        // Live updates change what is intercepted
+        secrets.set_allowed_hosts("API_KEY", &["x.com".into()]).unwrap();
+        assert!(!state.should_bypass("x.com"));
+        assert!(state.should_bypass("api.github.com"));
+
+        // Explicit bypass still wins
+        let state = TlsState::new(
+            TlsConfig {
+                bypass: vec!["api.github.com".into()],
+                ..TlsConfig::default()
+            },
+            SecretsHandle::new(secrets_for(&["api.github.com"])),
+        )
+        .unwrap();
+        assert!(state.should_bypass("api.github.com"));
+    }
+
+    #[test]
+    fn intercepts_everything_without_secrets_or_when_turned_off() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let state = TlsState::new(
+            TlsConfig::default(),
+            SecretsHandle::new(SecretsConfig::default()),
+        )
+        .unwrap();
+        assert!(!state.should_bypass("x.com"));
+
+        let state = TlsState::new(
+            TlsConfig {
+                intercept_secret_hosts_only: false,
+                ..TlsConfig::default()
+            },
+            SecretsHandle::new(secrets_for(&["api.github.com"])),
+        )
+        .unwrap();
+        assert!(!state.should_bypass("x.com"));
     }
 }
