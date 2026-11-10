@@ -552,6 +552,12 @@ impl TlsBuilder {
         self
     }
 
+    /// Intercept only the hosts a secret may be sent to (on by default), or every host.
+    pub fn intercept_secret_hosts_only(mut self, enabled: bool) -> Self {
+        self.config.intercept_secret_hosts_only = enabled;
+        self
+    }
+
     /// Add a domain to the bypass list (no MITM). Supports `*.suffix` wildcards.
     pub fn bypass(mut self, pattern: impl Into<String>) -> Self {
         self.config.bypass.push(pattern.into());

@@ -2943,6 +2943,17 @@ pub struct TlsConfig {
     #[serde(default)]
     pub bypass: Vec<String>,
 
+    /// Intercept only the hosts a secret may be sent to (folks fork, on by default).
+    ///
+    /// While the sandbox has at least one secret, a TLS connection whose server
+    /// name matches none of the secrets' allowed hosts is relayed untouched, as
+    /// if it were in [`bypass`](Self::bypass): the server sees the guest's own
+    /// TLS handshake instead of the proxy's, which sites with bot detection
+    /// refuse. The secrets are read per connection, so live secret updates
+    /// change what is intercepted. Without secrets, interception is as before.
+    #[serde(default = "default_true")]
+    pub intercept_secret_hosts_only: bool,
+
     /// Whether to verify the upstream server's TLS certificate.
     #[serde(default = "default_true")]
     pub verify_upstream: bool,
@@ -3042,6 +3053,7 @@ impl Default for TlsConfig {
             enabled: false,
             intercepted_ports: default_intercepted_ports(),
             bypass: Vec::new(),
+            intercept_secret_hosts_only: true,
             verify_upstream: true,
             block_quic_on_intercept: true,
             upstream_ca_cert: Vec::new(),
