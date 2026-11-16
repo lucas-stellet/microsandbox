@@ -2591,6 +2591,77 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn restored_memory_accepts_the_maximum_its_boot_size_can_reach() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .await
+            .unwrap();
+        seed_control_run(&local, "api").await;
+        let agent = local.agent_socket_paths("api").remove(0);
+        let path = microsandbox_runtime::control::control_socket_path_for(&agent);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let listener = tokio::net::UnixListener::bind(path).unwrap();
+        // A 641 MiB boot configured for 16384 MiB reaches 16383 MiB: the snapshot says the
+        // former and the restored VM the latter. One block further off is a real mismatch.
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&line).unwrap()["op"],
+                "capabilities"
+            );
+            stream
+                .get_mut()
+                .write_all(b"{\"ok\":true,\"capabilities\":{\"cpu_resize\":true,\"memory_resize\":true,\"secrets_update\":false}}\n")
+                .await
+                .unwrap();
+            for max_mib in [16_383, 16_381] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&line).unwrap()["op"],
+                    "memory_state"
+                );
+                let response = serde_json::json!({"ok":true,"memory":{
+                    "boot_mib":641,"max_mib":max_mib,"target_mib":1023,"current_mib":1023
+                }});
+                stream
+                    .get_mut()
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        for reaches in [true, false] {
+            let mut config = config(1, 641);
+            config.spec.resources.max_memory_mib = 16_384;
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                local.restore_requested_resources(&mut config),
+            )
+            .await
+            .unwrap();
+            if reaches {
+                result.unwrap();
+                assert_eq!(config.spec.resources.memory_mib, 1023);
+            } else {
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("outside captured capacity"));
+                assert_eq!(config.spec.resources.memory_mib, 641);
+            }
+        }
+        server.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn compaction_uses_selected_backend_for_discovery_and_mutation() {
         use microsandbox_types::DiskCompactionTarget;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

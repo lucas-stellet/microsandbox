@@ -13,6 +13,13 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 use super::ControlSession;
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Size of one virtio-mem block, the unit the VMM sizes the hotplug region in.
+const VIRTIO_MEM_BLOCK_MIB: u64 = 2;
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -103,8 +110,15 @@ impl LocalBackend {
                 .request(&GetMemoryState)
                 .await
                 .map_err(MicrosandboxError::ControlClient)?;
+            // The VMM builds the hotplug region from whole virtio-mem blocks past the boot size,
+            // so a configured maximum that is not a whole number of blocks past it is never
+            // reached. A snapshot records the configured maximum; the restored VM reports the
+            // one its geometry really has. Both describe the same captured capacity.
+            let max_mib = u64::from(resources.max_memory_mib);
+            let reachable_max_mib =
+                reachable_max_memory_mib(u64::from(resources.memory_mib), max_mib);
             if state.boot_mib != u64::from(resources.memory_mib)
-                || state.max_mib != u64::from(resources.max_memory_mib)
+                || (state.max_mib != max_mib && state.max_mib != reachable_max_mib)
                 || state.target_mib < state.boot_mib
                 || state.target_mib > state.max_mib
             {
@@ -241,6 +255,20 @@ impl CheckpointCaptureOutcome {
         })
     }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// The most memory a VM that boots with `boot_mib` can reach when configured for `max_mib`.
+///
+/// The hotplug region holds only whole virtio-mem blocks past the boot size, so a partial last
+/// block is left out: 16384 MiB from a 641 MiB boot stops at 16383 MiB.
+fn reachable_max_memory_mib(boot_mib: u64, max_mib: u64) -> u64 {
+    let hotplug_mib = max_mib.saturating_sub(boot_mib);
+    boot_mib + hotplug_mib / VIRTIO_MEM_BLOCK_MIB * VIRTIO_MEM_BLOCK_MIB
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -248,6 +276,15 @@ impl CheckpointCaptureOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reachable_maximum_leaves_out_a_partial_last_block() {
+        assert_eq!(reachable_max_memory_mib(512, 16_384), 16_384);
+        assert_eq!(reachable_max_memory_mib(641, 16_384), 16_383);
+        assert_eq!(reachable_max_memory_mib(641, 16_383), 16_383);
+        assert_eq!(reachable_max_memory_mib(512, 16_383), 16_382);
+        assert_eq!(reachable_max_memory_mib(1024, 1024), 1024);
+    }
 
     fn checkpoint_reply(ok: bool) -> microsandbox_protocol::control::CheckpointResult {
         microsandbox_protocol::control::CheckpointResult {
