@@ -4451,8 +4451,6 @@ checksum = "bc601bbe7784c2858abd909a4ef7afa79f9f4d5d941e2e21fedb5ca0d4ad46b2"
 [[package]]
 name = "msb_krun_cpuid"
 version = "0.1.45"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2692ad93a9f3da926d50d5f21e83984fa4fe2345727394da41a4b484e8c7935e"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",

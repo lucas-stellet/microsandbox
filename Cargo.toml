@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-exclude = ["sdk/rust/fuzz"]
+exclude = ["sdk/rust/fuzz", "vendor/msb_krun_cpuid"]
 members = [
     "crates/agentd",
     "crates/cli",
@@ -222,3 +222,8 @@ parking_lot = "0.13"
 rpassword = "7"
 russh = "0.65.0"
 russh-sftp = "2.3.0"
+
+# folks' fork: msb_krun_cpuid 0.1.45 with leaf 0x1F normalized per vCPU on Intel, like 0xB.
+# Its EDX is the host CPU's x2APIC ID, so nested snapshots were refused on another host CPU.
+[patch.crates-io]
+msb_krun_cpuid = { path = "vendor/msb_krun_cpuid" }
