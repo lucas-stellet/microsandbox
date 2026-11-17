@@ -1211,22 +1211,25 @@ fn publish_layer_closure(
 ) -> Result<Vec<Option<String>>, String> {
     let directory = root.join("layers");
     std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let targets = layers
+        .iter()
+        .map(|layer| directory.join(format!("{}.{}", layer.layer_id, layer.format.as_str())))
+        .collect::<Vec<_>>();
     let mut integrities = Vec::with_capacity(layers.len());
     for (index, layer) in layers.iter().enumerate() {
-        let target = directory.join(format!("{}.{}", layer.layer_id, layer.format.as_str()));
+        let target = targets[index].clone();
         if index > 0 && matches!(layer.format, RootDiskFormat::Qcow2) {
+            let backing = targets[index - 1].clone();
+            if link_sealed_layer(&directory, layer, &backing, &targets, &target)? {
+                integrities.push(layer.integrity_root.clone());
+                continue;
+            }
             // Published names differ from the active journal. Reflink/copy before rewriting:
             // the running VM and earlier checkpoints may still reference the source inode.
             let staging = tempfile::tempdir_in(&directory).map_err(|error| error.to_string())?;
             let staged = staging.path().join("layer.qcow2");
             microsandbox_utils::copy::fast_copy(&layer.path, &staged)
                 .map_err(|error| error.to_string())?;
-            let previous = &layers[index - 1];
-            let backing = directory.join(format!(
-                "{}.{}",
-                previous.layer_id,
-                previous.format.as_str()
-            ));
             microsandbox_image::checkpoint::relocate_qcow2_backing(&staged, &backing)
                 .map_err(|error| error.to_string())?;
             let expected = layer
@@ -1248,6 +1251,38 @@ fn publish_layer_closure(
     }
     sync_directory(&directory).map_err(|error| error.to_string())?;
     Ok(integrities)
+}
+
+/// Publish a sealed qcow2 layer as its own inode, keeping the backing name its header carries.
+///
+/// A sealed layer never changes: the guest writes only the head, and a restore attaches the
+/// caller-resolved chain without following header names. So instead of copying the layer to
+/// rewrite its backing name, the published predecessor gets that name as a hard link, as a local
+/// branch does. Copying made every checkpoint rewrite the whole chain above the base. Returns
+/// false, with nothing published, when the header's name can't be bound here; the caller then
+/// relocates a private copy.
+#[cfg(feature = "runner")]
+fn link_sealed_layer(
+    directory: &Path,
+    layer: &RootDiskLayer,
+    backing: &Path,
+    targets: &[PathBuf],
+    target: &Path,
+) -> Result<bool, String> {
+    let Ok(name) = qcow_backing_basename(&layer.path) else {
+        return Ok(false);
+    };
+    let alias = directory.join(name);
+    if alias != backing {
+        // Never let a header name take another layer's canonical identity.
+        if targets.contains(&alias)
+            || super::local_disk::link_exact(backing, &alias).is_err()
+        {
+            return Ok(false);
+        }
+    }
+    publish_sealed_layer(&layer.path, target, layer.integrity_root.as_deref())?;
+    Ok(true)
 }
 
 #[cfg(feature = "runner")]
@@ -1638,6 +1673,87 @@ mod tests {
             );
             assert!(load_runtime_owned_root_chain(&runtime).unwrap().is_some());
         }
+    }
+
+    #[cfg(all(feature = "runner", unix))]
+    #[tokio::test]
+    async fn checkpoints_publish_sealed_layers_as_the_same_inodes() {
+        use std::os::unix::fs::MetadataExt;
+
+        use super::*;
+
+        let inode = |path: &Path| std::fs::metadata(path).unwrap().ino();
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().join("upper.ext4");
+        std::fs::write(&base, vec![17u8; 131072]).unwrap();
+        let first = directory.path().join("upper-sealed-001.qcow2");
+        let second = directory.path().join("upper-restore-1.qcow2");
+        microsandbox_image::checkpoint::create_qcow2_overlay(&first, 131072, &base, "raw")
+            .await
+            .unwrap();
+        microsandbox_image::checkpoint::create_qcow2_overlay(&second, 131072, &first, "qcow2")
+            .await
+            .unwrap();
+        let layer = |path: &Path, format| RootDiskLayer {
+            layer_id: new_id("layer"),
+            path: path.to_path_buf(),
+            format,
+            integrity_root: None,
+        };
+        let state = RootDiskState {
+            schema: ROOT_DISK_STATE_SCHEMA.into(),
+            volume_id: new_id("vol"),
+            device_id: FLAT_ROOT_DEVICE_ID.into(),
+            layout: RootDiskLayout::FlatRoot,
+            published_generation: 0,
+            launch_base: None,
+            growth_target: None,
+            layers: vec![
+                layer(&base, RootDiskFormat::Raw),
+                layer(&first, RootDiskFormat::Qcow2),
+                layer(&second, RootDiskFormat::Qcow2),
+            ],
+        };
+        let sealed = state.sealed_generation(true).unwrap();
+
+        // Two checkpoints of the same chain, as two sleeps: neither copies a layer.
+        for checkpoint in ["first", "second"] {
+            let root = directory.path().join(checkpoint);
+            let integrities = publish_layer_closure(&root, &sealed.layers).unwrap();
+            for (index, layer) in sealed.layers.iter().enumerate() {
+                let published = root
+                    .join("layers")
+                    .join(format!("{}.{}", layer.layer_id, layer.format.as_str()));
+                assert_eq!(inode(&published), inode(&layer.path), "layer {index}");
+                assert_eq!(integrities[index], layer.integrity_root);
+                assert_eq!(
+                    integrities[index].as_deref(),
+                    Some(sparse_file_integrity(&published).unwrap().root.as_str())
+                );
+            }
+            // Each header's own name resolves to the published predecessor inside the artifact.
+            assert_eq!(inode(&root.join("layers/upper.ext4")), inode(&base));
+            assert_eq!(inode(&root.join("layers/upper-sealed-001.qcow2")), inode(&first));
+        }
+
+        // A header name that is already another file there is never rebound: that layer is
+        // relocated into a private copy, as before.
+        let root = directory.path().join("taken");
+        std::fs::create_dir_all(root.join("layers")).unwrap();
+        std::fs::write(root.join("layers/upper-sealed-001.qcow2"), b"someone else").unwrap();
+        publish_layer_closure(&root, &sealed.layers).unwrap();
+        let published = root
+            .join("layers")
+            .join(format!("{}.qcow2", sealed.layers[2].layer_id));
+        assert_ne!(inode(&published), inode(&second));
+        assert_eq!(
+            qcow_backing_basename(&published).unwrap(),
+            format!("{}.qcow2", sealed.layers[1].layer_id)
+        );
+        assert_eq!(
+            std::fs::read(root.join("layers/upper-sealed-001.qcow2")).unwrap(),
+            b"someone else"
+        );
     }
 
     #[cfg(feature = "runner")]

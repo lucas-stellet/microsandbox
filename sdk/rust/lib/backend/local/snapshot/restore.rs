@@ -522,6 +522,16 @@ fn copy_child_disk_layer(
     predecessor: Option<&Path>,
 ) -> std::io::Result<()> {
     if let Some(predecessor) = predecessor {
+        // A sealed layer whose header already names its predecessor's child basename needs no
+        // rewrite: only the private head is ever written, so it keeps the captured inode, as a
+        // local branch does. A checkpoint publishes sealed layers with the names their journal
+        // gave them, which are these child names, so a chain that slept and woke here before
+        // keeps every layer; an older artifact's relocated names are copied once.
+        if microsandbox_image::checkpoint::qcow2_backing_basename(source).ok().as_deref()
+            == predecessor.file_name().and_then(|name| name.to_str())
+        {
+            return copy_checkpoint_file(source, target);
+        }
         // Only qcow2 layers may have a predecessor. Their relocated header must not write into
         // an inode shared with the source artifact or another restored child.
         microsandbox_utils::copy::fast_copy(source, target)?;
@@ -570,6 +580,55 @@ mod tests {
     use crate::backend::local::creation::CreationStorage;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_restored_layer_keeps_its_inode_when_its_header_names_the_child_predecessor() {
+        use std::os::unix::fs::MetadataExt;
+
+        let inode = |path: &Path| std::fs::metadata(path).unwrap().ino();
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = dir.path().join("artifact");
+        let child = dir.path().join("child");
+        std::fs::create_dir_all(&artifact).unwrap();
+        std::fs::create_dir_all(&child).unwrap();
+        let base = artifact.join("layer_base.raw");
+        std::fs::write(&base, vec![29; 131072]).unwrap();
+        // Published by a checkpoint with its journal's name, the child's name for the base.
+        std::fs::hard_link(&base, artifact.join("upper.ext4")).unwrap();
+        let named = artifact.join("layer_named.qcow2");
+        microsandbox_image::checkpoint::create_qcow2_overlay(
+            &named,
+            131072,
+            &artifact.join("upper.ext4"),
+            "raw",
+        )
+        .await
+        .unwrap();
+        // Published by an older checkpoint, relocated to its predecessor's layer id.
+        let relocated = artifact.join("layer_relocated.qcow2");
+        microsandbox_image::checkpoint::create_qcow2_overlay(&relocated, 131072, &base, "raw")
+            .await
+            .unwrap();
+
+        let child_base = child.join("upper.ext4");
+        copy_child_disk_layer(&base, &child_base, None).unwrap();
+        let kept = child.join("upper-sealed-001.qcow2");
+        copy_child_disk_layer(&named, &kept, Some(&child_base)).unwrap();
+        assert_eq!(inode(&kept), inode(&named));
+
+        let copied = child.join("upper-sealed-002.qcow2");
+        copy_child_disk_layer(&relocated, &copied, Some(&child_base)).unwrap();
+        assert_ne!(inode(&copied), inode(&relocated));
+        assert_eq!(
+            microsandbox_image::checkpoint::qcow2_backing_basename(&copied).unwrap(),
+            "upper.ext4"
+        );
+        assert_eq!(
+            microsandbox_image::checkpoint::qcow2_backing_basename(&relocated).unwrap(),
+            "layer_base.raw"
+        );
+    }
 
     #[tokio::test]
     async fn local_adoption_preserves_owned_layers_and_cold_boot_base() {
