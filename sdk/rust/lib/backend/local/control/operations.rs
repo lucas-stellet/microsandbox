@@ -150,7 +150,10 @@ impl ControlSession {
                 "this running sandbox does not support disk compaction; restart with the updated runtime".into(),
             ));
         }
-        self.request(&CompactDisks(microsandbox_protocol::control::DiskCompact {
+        // Compaction materializes the merged prefix before it answers, which takes minutes on a
+        // long chain: wait like a capture instead of failing at the short control deadline while
+        // the runtime goes on to finish it.
+        self.capture(&CompactDisks(microsandbox_protocol::control::DiskCompact {
             target,
             layers: layers.map(|value| value as u64),
             dry_run,

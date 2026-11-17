@@ -84,7 +84,8 @@ impl ControlSession {
             .await
     }
 
-    /// Wait for a snapshot or fork capture, including publication and source recovery.
+    /// Wait for a snapshot or fork capture, including publication and source recovery, or for a
+    /// disk compaction, which is as long.
     pub(crate) async fn capture<R: CompatibleControlRequest>(
         &self,
         request: &R,
